@@ -54,8 +54,9 @@ class BaseLLMStep(AsyncStep, Generic[T, U, R]):
         response_model: Type[T],
         converter: Callable[[T], List[U]],
         max_retries: int = 2,
-        retry_delay: float = 3.0,
-        total_timeout: float = 30.0,
+        retry_delay: float = 1.0,
+        total_timeout: float = 90.0,
+        call_timeout: float = 40.0,
     ) -> List[U]:
         start_time = time.time()
         json_parsing_errors = 0
@@ -64,16 +65,24 @@ class BaseLLMStep(AsyncStep, Generic[T, U, R]):
             try:
                 elapsed_time = time.time() - start_time
                 if elapsed_time > total_timeout:
+                    self.log.warning(f"Total timeout exceeded ({total_timeout}s)")
                     return []
 
-                result = await self.llm.hallucinate(
-                    messages=hallucination_params["messages"],
-                    temperature=hallucination_params.get("temperature", self.temperature),
-                    tools=hallucination_params.get("tools", []),
-                    parallel_tool_calls=hallucination_params.get("parallel_tool_calls", False),
-                    response_format=response_model,
-                    user=hallucination_params.get("user", self.name or ""),
-                    is_vision=hallucination_params.get("is_vision", False),
+                remaining_time = min(call_timeout, total_timeout - elapsed_time)
+                if remaining_time <= 0:
+                    return []
+
+                result = await asyncio.wait_for(
+                    self.llm.hallucinate(
+                        messages=hallucination_params["messages"],
+                        temperature=hallucination_params.get("temperature", self.temperature),
+                        tools=hallucination_params.get("tools", []),
+                        parallel_tool_calls=hallucination_params.get("parallel_tool_calls", False),
+                        response_format=response_model,
+                        user=hallucination_params.get("user", self.name or ""),
+                        is_vision=hallucination_params.get("is_vision", False),
+                    ),
+                    timeout=remaining_time
                 )
                 content = result.message.content
 
@@ -83,6 +92,13 @@ class BaseLLMStep(AsyncStep, Generic[T, U, R]):
                 parsed_data: Dict = json.loads(content)
                 parsed_model: T = response_model.model_validate(parsed_data)
                 return converter(parsed_model)
+
+            except asyncio.TimeoutError:
+                self.log.warning(f"LLM call timeout after {call_timeout}s (attempt {attempt + 1}/{max_retries})")
+                attempt += 1
+                if attempt < max_retries:
+                    await asyncio.sleep(retry_delay)
+                continue
 
             except json.JSONDecodeError:
                 attempt += 1
@@ -94,7 +110,8 @@ class BaseLLMStep(AsyncStep, Generic[T, U, R]):
                 else:
                     return []
 
-            except Exception:
+            except Exception as e:
+                self.log.warning(f"LLM extraction error: {str(e)[:100]} (attempt {attempt + 1}/{max_retries})")
                 attempt += 1
                 if attempt < max_retries:
                     await asyncio.sleep(retry_delay)

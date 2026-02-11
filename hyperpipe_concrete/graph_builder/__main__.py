@@ -95,35 +95,33 @@ async def build_graph(qtracker,
         **pipeline_config['neo4j_exporter']
     )
 
-    def create_entity_pipeline(chunk_idx: int) -> AsyncBatchPipeline:
+    def create_entity_extractor(chunk_idx: int) -> AsyncEntityExtractor:
         extractor = AsyncEntityExtractor(
             llm=llm,
             **pipeline_config['entity_extractor'],
         )
         extractor.iteration = chunk_idx
-        return AsyncBatchPipeline([extractor, entity_cleaner],name=f"Entity {chunk_idx}")
+        return extractor
     
-    def create_relation_pipeline(chunk_idx: int) -> AsyncBatchPipeline:
+    def create_relation_extractor(chunk_idx: int) -> AsyncRelationExtractor:
         extractor = AsyncRelationExtractor(
             llm=llm,
             **pipeline_config['relation_extractor'],
         )
         extractor.iteration = chunk_idx
-        return AsyncBatchPipeline([extractor, triplet_cleaner],name=f"Relation{chunk_idx}")
+        return extractor
     
-    steps_entity_extractor = [create_entity_pipeline(i) for i in range(num_chunks)]
-    steps_relation_extractor = [create_relation_pipeline(i) for i in range(num_chunks)]
+    steps_entity_extractor = [create_entity_extractor(i) for i in range(num_chunks)]
+    steps_relation_extractor = [create_relation_extractor(i) for i in range(num_chunks)]
 
-    def create_batch_pipeline(entity_pipes: List, relation_pipes: List) -> Pipeline:
+    def create_batch_pipeline(entity_extractors: List, relation_extractors: List) -> Pipeline:
         
         components = [
-            AsyncBatchPipeline(
-                entity_pipes, name="Entity"
-            ),
+            AsyncBatchPipeline(entity_extractors, name="Entity"),
+            entity_cleaner,
             entity_text_merger,
-            AsyncBatchPipeline(
-                relation_pipes, name="Relation"
-            ),
+            AsyncBatchPipeline(relation_extractors, name="Relation"),
+            triplet_cleaner,
             triplet_entity_merger,
             triplet_embedder,
             relation_text_merger,
